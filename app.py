@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy.interpolate import Rbf
+from scipy.interpolate import Rbf, RegularGridInterpolator
 from scipy.spatial import cKDTree
+from PIL import Image
+import os
 
 st.set_page_config(layout="wide", page_title="Jeolojik 3D Mineral Risk Modeli")
 
@@ -72,27 +74,7 @@ with st.sidebar.form("model_ayarlari"):
     submitted = st.form_submit_button("🌋 MODELİ OLUŞTUR / GÜNCELLE")
 
 # -------------------------------------------------
-# 3. YÜZEY (TOPOGRAFYA) OLUŞTURUCU (HATA DÜZELTİLDİ)
-# -------------------------------------------------
-def generate_topography(bh_coords, padding=200):
-    """Sondajların tepe kotlarından doğrudan RBF ile topografya haritası üretir."""
-    collar_x = [c['x'] for c in bh_coords.values()]
-    collar_y = [c['y'] for c in bh_coords.values()]
-    collar_z = [c['z'] for c in bh_coords.values()]
-    
-    tx = np.linspace(min(collar_x) - padding, max(collar_x) + padding, 50)
-    ty = np.linspace(min(collar_y) - padding, max(collar_y) + padding, 50)
-    TX, TY = np.meshgrid(tx, ty)
-    
-    # YENİ: griddata yerine RBF (Radial Basis Function) kullandık
-    # Bu sayede sadece 6 sondaj olsa bile haritanın tamamını pürüzsüzce doldurur (NaN hatası vermez).
-    rbf_topo = Rbf(collar_x, collar_y, collar_z, function='thin_plate')
-    TZ = rbf_topo(TX, TY)
-    
-    return tx, ty, TZ, collar_x, collar_y, collar_z
-
-# -------------------------------------------------
-# 4. HESAPLAMA MOTORU (GEOMETRİ VE HACİM)
+# 3. HESAPLAMA MOTORU (GEOMETRİ VE HACİM)
 # -------------------------------------------------
 @st.cache_data
 def run_3d_engine(mineral_name, radius_val):
@@ -105,7 +87,36 @@ def run_3d_engine(mineral_name, radius_val):
         "6SK": {"x": 631675.12, "y": 4291824.45, "z": 962},
     }
 
-    # Gerçek veri noktalarını hazırla
+    # 1. aaa.tif DOSYASINI OKUMA (GERİ GELDİ)
+    tif_path = "aaa.tif"
+    if not os.path.exists(tif_path):
+        st.error(f"'{tif_path}' dosyası bulunamadı! Lütfen kodu çalıştırdığınız klasöre ekleyin.")
+        st.stop()
+        
+    img = Image.open(tif_path)
+    topo = np.array(img).astype(float)
+    topo[topo > 3000] = np.nan
+    
+    # Harita koordinat dönüşümü (Senin verdiğin orijinal değerler)
+    x0, y0, dx, dy = 628847.89, 4293423.24, 27.73, 27.73
+    xc = x0 + np.arange(topo.shape[1]) * dx
+    yc = y0 - np.arange(topo.shape[0]) * dy
+    
+    # Sadece sondajların etrafını (çalışma alanını) keselim
+    bx = [b["x"] for b in borehole_coords.values()]
+    by = [b["y"] for b in borehole_coords.values()]
+    margin_xy = 350
+    
+    mx = (xc >= min(bx) - margin_xy) & (xc <= max(bx) + margin_xy)
+    my = (yc >= min(by) - margin_xy) & (yc <= max(by) + margin_xy)
+    
+    tx, ty = xc[mx], yc[my]
+    tz = topo[np.ix_(my, mx)]
+    
+    # Topografya Enterpolatörü (Hacmi traşlamak için)
+    topo_interp = RegularGridInterpolator((tx, ty[::-1]), np.flipud(tz).T, bounds_error=False, fill_value=None)
+
+    # 2. NUMUNE VERİLERİNİ HAZIRLA
     plot_data = []
     for _, row in df_main.iterrows():
         well = row['Sondaj']
@@ -130,7 +141,6 @@ def run_3d_engine(mineral_name, radius_val):
 
     # İşlem Alanı (Grid)
     res = 40
-    margin_xy = 250
     xi = np.linspace(x_min - margin_xy, x_max + margin_xy, res)
     yi = np.linspace(y_min - margin_xy, y_max + margin_xy, res)
     zi = np.linspace(z_min, z_max, res)
@@ -140,43 +150,39 @@ def run_3d_engine(mineral_name, radius_val):
     YGn = (YG - y_min) / (y_max - y_min)
     ZGn = (ZG - z_min) / (z_max - z_min)
     
-    # RBF İnterpolasyon
+    # 3. RBF (HACİM HESAPLAMA)
     rbf = Rbf(xn, yn, zn, df_plot['val'], function='thin_plate')
     vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
     vals = np.clip(vals, 0, df_plot['val'].max())
 
-    # Topografyayı Çek
-    tx, ty, TZ, collar_x, collar_y, collar_z = generate_topography(borehole_coords, padding=margin_xy)
-    
-    # TOPOGRAFYA TIRAŞLAMASI (Hacimleri topografyaya uydur - RBF ile güncellendi)
-    rbf_topo_vol = Rbf(collar_x, collar_y, collar_z, function='thin_plate')
-    TZ_vol = rbf_topo_vol(XG.flatten(), YG.flatten())
-    vals[ZG.flatten() > TZ_vol] = -1
+    # 4. GERÇEK DEM TOPOGRAFYASI İLE TIRAŞLAMA
+    surf_pts = topo_interp(np.column_stack([XG.flatten(), YG.flatten()]))
+    vals[ZG.flatten() > surf_pts] = -1
 
     # YATAY (2D) MESAFE MASKESİ
     tree_2d = cKDTree(np.column_stack([df_plot['x'], df_plot['y']]))
     dist_2d, _ = tree_2d.query(np.column_stack([XG.flatten(), YG.flatten()]))
     vals[dist_2d > radius_val] = -1
     
-    return tx, ty, TZ, XG, YG, ZG, vals, df_plot, borehole_coords
+    return tx, ty, tz, XG, YG, ZG, vals, df_plot, borehole_coords
 
 # -------------------------------------------------
-# 5. GÖRSELLEŞTİRME VE ÇİZİM
+# 4. GÖRSELLEŞTİRME VE ÇİZİM
 # -------------------------------------------------
 if submitted or 'initialized' not in st.session_state:
     st.session_state.initialized = True
-    with st.spinner(f"Kapsamlı Blok Model Oluşturuluyor... Lütfen Bekleyin."):
-        tx, ty, TZ, XG, YG, ZG, vals, df_points, bh_coords = run_3d_engine(target_mineral, radius_limit)
+    with st.spinner(f"Topografya ve Blok Model Oluşturuluyor... Lütfen Bekleyin."):
+        tx, ty, tz, XG, YG, ZG, vals, df_points, bh_coords = run_3d_engine(target_mineral, radius_limit)
         
         fig = go.Figure()
 
-        # 1. Topografya 
+        # 1. DEM Dosyasından Gelen Gerçek Topografya
         fig.add_trace(go.Surface(
-            x=tx, y=ty, z=TZ, 
+            x=tx, y=ty, z=tz, 
             opacity=topo_opacity, 
             colorscale=[[0, topo_color], [1, topo_color]],
             showscale=False, 
-            name="Yer Yüzeyi"
+            name="Gerçek DEM Topografyası"
         ))
 
         # 2. Sondaj Kuyuları
