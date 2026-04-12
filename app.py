@@ -63,7 +63,7 @@ with st.sidebar.form("model_ayarlari"):
     
     st.subheader("Görsel Parametreler")
     risk_cutoff = st.slider(f"{target_mineral} Gösterim Eşiği (%)", 0.0, 20.0, 1.0)
-    radius_limit = st.slider("2D Yatay Etki Alanı (Metre)", 50, 1500, 600, help="Değer büyüdükçe kütleler birbirine daha çok kaynaşır.")
+    radius_limit = st.slider("2D Yatay Etki Alanı (Metre)", 50, 1500, 600)
     z_exag = st.slider("Dikey Abartı (Z)", 1, 30, 8)
     
     st.subheader("Görünüm")
@@ -87,7 +87,7 @@ def run_3d_engine(mineral_name, radius_val):
         "6SK": {"x": 631675.12, "y": 4291824.45, "z": 962},
     }
 
-    # 1. aaa.tif DOSYASINI OKUMA (GERİ GELDİ)
+    # 1. aaa.tif DOSYASINI OKUMA
     tif_path = "aaa.tif"
     if not os.path.exists(tif_path):
         st.error(f"'{tif_path}' dosyası bulunamadı! Lütfen kodu çalıştırdığınız klasöre ekleyin.")
@@ -97,12 +97,10 @@ def run_3d_engine(mineral_name, radius_val):
     topo = np.array(img).astype(float)
     topo[topo > 3000] = np.nan
     
-    # Harita koordinat dönüşümü (Senin verdiğin orijinal değerler)
     x0, y0, dx, dy = 628847.89, 4293423.24, 27.73, 27.73
     xc = x0 + np.arange(topo.shape[1]) * dx
     yc = y0 - np.arange(topo.shape[0]) * dy
     
-    # Sadece sondajların etrafını (çalışma alanını) keselim
     bx = [b["x"] for b in borehole_coords.values()]
     by = [b["y"] for b in borehole_coords.values()]
     margin_xy = 350
@@ -113,7 +111,6 @@ def run_3d_engine(mineral_name, radius_val):
     tx, ty = xc[mx], yc[my]
     tz = topo[np.ix_(my, mx)]
     
-    # Topografya Enterpolatörü (Hacmi traşlamak için)
     topo_interp = RegularGridInterpolator((tx, ty[::-1]), np.flipud(tz).T, bounds_error=False, fill_value=None)
 
     # 2. NUMUNE VERİLERİNİ HAZIRLA
@@ -122,6 +119,7 @@ def run_3d_engine(mineral_name, radius_val):
         well = row['Sondaj']
         if well in borehole_coords:
             plot_data.append({
+                'well': well, # Tıraşlama algoritması için eklendi
                 'x': borehole_coords[well]['x'],
                 'y': borehole_coords[well]['y'],
                 'z': borehole_coords[well]['z'] - row['Derinlik'],
@@ -130,7 +128,6 @@ def run_3d_engine(mineral_name, radius_val):
     
     df_plot = pd.DataFrame(plot_data)
     
-    # KOORDİNAT NORMALİZASYONU (Sürekli Hacim İçin)
     x_min, x_max = df_plot['x'].min(), df_plot['x'].max()
     y_min, y_max = df_plot['y'].min(), df_plot['y'].max()
     z_min, z_max = df_plot['z'].min() - 15, df_plot['z'].max() + 5
@@ -155,7 +152,7 @@ def run_3d_engine(mineral_name, radius_val):
     vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
     vals = np.clip(vals, 0, df_plot['val'].max())
 
-    # 4. GERÇEK DEM TOPOGRAFYASI İLE TIRAŞLAMA
+    # 4. ÜST SINIR: GERÇEK DEM TOPOGRAFYASI İLE TIRAŞLAMA
     surf_pts = topo_interp(np.column_stack([XG.flatten(), YG.flatten()]))
     vals[ZG.flatten() > surf_pts] = -1
 
@@ -163,6 +160,21 @@ def run_3d_engine(mineral_name, radius_val):
     tree_2d = cKDTree(np.column_stack([df_plot['x'], df_plot['y']]))
     dist_2d, _ = tree_2d.query(np.column_stack([XG.flatten(), YG.flatten()]))
     vals[dist_2d > radius_val] = -1
+    
+    # =========================================================
+    # YENİ EKLENTİ: ALT SINIR (BASEMENT) TIRAŞLAMASI
+    # Her sondajın en alt numunesini (minimum Z değeri) bulur
+    # =========================================================
+    idx_min_z = df_plot.groupby('well')['z'].idxmin()
+    bottom_pts = df_plot.loc[idx_min_z]
+
+    # Modeldeki her nokta için en yakın sondajın alt sınır kotunu bul
+    tree_bottom = cKDTree(np.column_stack([bottom_pts['x'], bottom_pts['y']]))
+    _, idx_nearest = tree_bottom.query(np.column_stack([XG.flatten(), YG.flatten()]))
+    nearest_bottom_z = bottom_pts.iloc[idx_nearest]['z'].values
+
+    # Hacmi, o bölgeye en yakın olan sondajın bittiği derinlikten itibaren kes (-2 metre tolerans)
+    vals[ZG.flatten() < (nearest_bottom_z - 2)] = -1
     
     return tx, ty, tz, XG, YG, ZG, vals, df_plot, borehole_coords
 
@@ -185,10 +197,14 @@ if submitted or 'initialized' not in st.session_state:
             name="Gerçek DEM Topografyası"
         ))
 
-        # 2. Sondaj Kuyuları
+        # 2. Sondaj Kuyuları (Derinlikleri otomatik olarak gerçek numune diplerine kadar çizer)
         for name, c in bh_coords.items():
+            # YENİ: Kuyunun siyah çizgisini tam olarak o kuyuya ait en derin veride bitir.
+            well_min_z = df_points[df_points['well'] == name]['z'].min()
+            if pd.isna(well_min_z): well_min_z = c['z'] - 50 # Herhangi bir hataya karşı yedek
+            
             fig.add_trace(go.Scatter3d(
-                x=[c['x'], c['x']], y=[c['y'], c['y']], z=[c['z'], c['z']-60],
+                x=[c['x'], c['x']], y=[c['y'], c['y']], z=[c['z'], well_min_z],
                 mode='lines+text', line=dict(color='black', width=5), 
                 text=["", name], textposition="top center", name=name, showlegend=False
             ))
