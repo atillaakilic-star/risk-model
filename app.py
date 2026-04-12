@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy.interpolate import Rbf, griddata
+from scipy.interpolate import Rbf
 from scipy.spatial import cKDTree
 
 st.set_page_config(layout="wide", page_title="Jeolojik 3D Mineral Risk Modeli")
@@ -61,7 +61,6 @@ with st.sidebar.form("model_ayarlari"):
     
     st.subheader("Görsel Parametreler")
     risk_cutoff = st.slider(f"{target_mineral} Gösterim Eşiği (%)", 0.0, 20.0, 1.0)
-    # YENİ: Etki alanı varsayılanı sahayı doldurması için 600m yapıldı
     radius_limit = st.slider("2D Yatay Etki Alanı (Metre)", 50, 1500, 600, help="Değer büyüdükçe kütleler birbirine daha çok kaynaşır.")
     z_exag = st.slider("Dikey Abartı (Z)", 1, 30, 8)
     
@@ -73,10 +72,10 @@ with st.sidebar.form("model_ayarlari"):
     submitted = st.form_submit_button("🌋 MODELİ OLUŞTUR / GÜNCELLE")
 
 # -------------------------------------------------
-# 3. YÜZEY (TOPOGRAFYA) OLUŞTURUCU
+# 3. YÜZEY (TOPOGRAFYA) OLUŞTURUCU (HATA DÜZELTİLDİ)
 # -------------------------------------------------
 def generate_topography(bh_coords, padding=200):
-    """Sondajların tepe kotlarından doğrudan topografya haritası üretir."""
+    """Sondajların tepe kotlarından doğrudan RBF ile topografya haritası üretir."""
     collar_x = [c['x'] for c in bh_coords.values()]
     collar_y = [c['y'] for c in bh_coords.values()]
     collar_z = [c['z'] for c in bh_coords.values()]
@@ -85,12 +84,10 @@ def generate_topography(bh_coords, padding=200):
     ty = np.linspace(min(collar_y) - padding, max(collar_y) + padding, 50)
     TX, TY = np.meshgrid(tx, ty)
     
-    # Kübik interpolasyon ile pürüzsüz yüzey yarat
-    TZ = griddata((collar_x, collar_y), collar_z, (TX, TY), method='cubic')
-    
-    # Kenarlarda kalan (sondaj dışı) boşlukları en yakın veri ile doldur
-    TZ_near = griddata((collar_x, collar_y), collar_z, (TX, TY), method='nearest')
-    TZ[np.isnan(TZ)] = TZ_near[np.isnan(TZ)]
+    # YENİ: griddata yerine RBF (Radial Basis Function) kullandık
+    # Bu sayede sadece 6 sondaj olsa bile haritanın tamamını pürüzsüzce doldurur (NaN hatası vermez).
+    rbf_topo = Rbf(collar_x, collar_y, collar_z, function='thin_plate')
+    TZ = rbf_topo(TX, TY)
     
     return tx, ty, TZ, collar_x, collar_y, collar_z
 
@@ -122,8 +119,7 @@ def run_3d_engine(mineral_name, radius_val):
     
     df_plot = pd.DataFrame(plot_data)
     
-    # YENİ EKLENTİ 1: KOORDİNAT NORMALİZASYONU (Sürekli Hacim İçin)
-    # X, Y ve Z eksenleri metrik olarak çok farklı olduğu için [0,1] aralığına sıkıştırıyoruz.
+    # KOORDİNAT NORMALİZASYONU (Sürekli Hacim İçin)
     x_min, x_max = df_plot['x'].min(), df_plot['x'].max()
     y_min, y_max = df_plot['y'].min(), df_plot['y'].max()
     z_min, z_max = df_plot['z'].min() - 15, df_plot['z'].max() + 5
@@ -144,22 +140,20 @@ def run_3d_engine(mineral_name, radius_val):
     YGn = (YG - y_min) / (y_max - y_min)
     ZGn = (ZG - z_min) / (z_max - z_min)
     
-    # RBF İnterpolasyon (thin_plate modeli jeolojik kütleler için daha homojendir)
+    # RBF İnterpolasyon
     rbf = Rbf(xn, yn, zn, df_plot['val'], function='thin_plate')
     vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
-    vals = np.clip(vals, 0, df_plot['val'].max()) # Negatif hataları sıfırla
+    vals = np.clip(vals, 0, df_plot['val'].max())
 
     # Topografyayı Çek
     tx, ty, TZ, collar_x, collar_y, collar_z = generate_topography(borehole_coords, padding=margin_xy)
     
-    # YENİ EKLENTİ 2: TOPOGRAFYA TIRAŞLAMASI
-    # Havada asılı kalan (yüzeyin üzerinde olan) hacimleri traşla
-    TZ_vol = griddata((collar_x, collar_y), collar_z, (XG.flatten(), YG.flatten()), method='nearest')
+    # TOPOGRAFYA TIRAŞLAMASI (Hacimleri topografyaya uydur - RBF ile güncellendi)
+    rbf_topo_vol = Rbf(collar_x, collar_y, collar_z, function='thin_plate')
+    TZ_vol = rbf_topo_vol(XG.flatten(), YG.flatten())
     vals[ZG.flatten() > TZ_vol] = -1
 
-    # YENİ EKLENTİ 3: SADECE YATAY (2D) MESAFE MASKESİ
-    # Eskisi gibi 3D mesafe kullanırsak her noktanın etrafında toplar (küreler) oluşur.
-    # 2D mesafe ile maskelemek, jeolojik tabakalar gibi katı bloklar oluşmasını sağlar.
+    # YATAY (2D) MESAFE MASKESİ
     tree_2d = cKDTree(np.column_stack([df_plot['x'], df_plot['y']]))
     dist_2d, _ = tree_2d.query(np.column_stack([XG.flatten(), YG.flatten()]))
     vals[dist_2d > radius_val] = -1
@@ -176,7 +170,7 @@ if submitted or 'initialized' not in st.session_state:
         
         fig = go.Figure()
 
-        # 1. Topografya (Artık sondajlarla %100 tam oturuyor)
+        # 1. Topografya 
         fig.add_trace(go.Surface(
             x=tx, y=ty, z=TZ, 
             opacity=topo_opacity, 
