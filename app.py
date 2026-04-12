@@ -39,31 +39,32 @@ data_raw = {
 }
 
 # -------------------------------------------------
-# 3. AYARLAR PANELİ
+# 3. FORM YAPISI (Sidebar içinde)
 # -------------------------------------------------
 st.sidebar.title("3D Model Kontrol Paneli")
 
-st.sidebar.subheader("Görselleştirme")
-show_volume = st.sidebar.checkbox("Risk Hacmini Göster", True)
-point_size = st.sidebar.slider("Sondaj Nokta Boyutu", 3, 10, 5)
-z_exag = st.sidebar.slider("Dikey Abartı", 1.0, 30.0, 10.0)
+# Formu başlatıyoruz
+with st.sidebar.form("model_parametreleri"):
+    st.subheader("Görselleştirme Ayarları")
+    show_volume = st.checkbox("Risk Hacmini Göster", True)
+    point_size = st.slider("Sondaj Nokta Boyutu", 3, 10, 5)
+    z_exag = st.slider("Dikey Abartı", 1.0, 30.0, 10.0)
 
-st.sidebar.subheader("Topografya Ayarları")
-topo_color = st.sidebar.color_picker("Yüzey Rengi", "#C2B280")
-topo_opacity = st.sidebar.slider("Yüzey Şeffaflığı", 0.0, 1.0, 0.4, step=0.1)
+    st.subheader("Topografya & Risk")
+    topo_color = st.color_picker("Yüzey Rengi", "#C2B280")
+    topo_opacity = st.slider("Yüzey Şeffaflığı", 0.0, 1.0, 0.4)
+    risk_min = st.slider("Risk Eşiği (Cut-off)", 0.0, 20.0, 1.5)
+    radius_limit = st.slider("Etki Yarıçapı (Metre)", 50, 1000, 250)
 
-st.sidebar.subheader("Risk Analizi ve Enterpolasyon")
-risk_min = st.sidebar.slider("Risk Eşiği (Cut-off)", 0.0, 20.0, 1.5, step=0.1)
-
-# YENİ ÖZELLİK: Modelin ne kadar uzağa tahmin yapacağını kısıtlar
-radius_limit = st.sidebar.slider("Etki Yarıçapı (Metre)", 50, 1000, 250, help="Sondaj verisinden bu kadar uzak olan bölgelerde risk hesaplanmaz.")
+    # ÖNEMLİ: Formun gönderilmesini sağlayan buton
+    submitted = st.form_submit_button("Modeli Hesapla ve Güncelle")
 
 # -------------------------------------------------
-# 4. HESAPLAMA
+# 4. HESAPLAMA FONKSİYONU
 # -------------------------------------------------
 @st.cache_data
-def perform_interpolation(radius_limit_val):
-    # 1. Topografya
+def perform_interpolation(radius_val):
+    # Topografya yükleme
     img = Image.open(tif_path)
     topo = np.array(img).astype(float)
     topo[topo > 3000] = np.nan
@@ -82,181 +83,82 @@ def perform_interpolation(radius_limit_val):
     tx, ty = xc[mx], yc[my]
     tz = topo[np.ix_(my, mx)]
     
-    topo_interp = RegularGridInterpolator(
-        (tx, ty[::-1]), np.flipud(tz).T, 
-        bounds_error=False, fill_value=None
-    )
+    topo_interp = RegularGridInterpolator((tx, ty[::-1]), np.flipud(tz).T, bounds_error=False, fill_value=None)
     
-    # 2. Veri Hazırlığı
+    # Veri Hazırlığı
     rows = []
     for bh, pts in data_raw.items():
         for d, v in pts:
-            rows.append({
-                "BH": bh, "X": boreholes[bh]["x"], "Y": boreholes[bh]["y"],
-                "Z": boreholes[bh]["z"] - d, "Val": v
-            })
+            rows.append({"BH": bh, "X": boreholes[bh]["x"], "Y": boreholes[bh]["y"], "Z": boreholes[bh]["z"] - d, "Val": v})
     df = pd.DataFrame(rows)
     
-    z_top = df["Z"].max() + 5
-    z_bot = min(b["z"] for b in boreholes.values()) - 55
-    
-    # Normalizasyon
+    z_top, z_bot = df["Z"].max() + 5, min(b["z"] for b in boreholes.values()) - 55
     xn = (df["X"] - df["X"].min()) / (df["X"].max() - df["X"].min())
     yn = (df["Y"] - df["Y"].min()) / (df["Y"].max() - df["Y"].min())
     zn = (df["Z"] - z_bot) / (z_top - z_bot)
     
-    # RBF ENTERPOLASYON (DÜZELTİLDİ)
-    # 'multiquadric' yerine 'linear' kullanıldı. Multiquadric boşluklarda sonsuza gider.
-    # Linear ise veri noktaları arasında daha sıkı durur.
     rbf = Rbf(xn, yn, zn, df["Val"], epsilon=0.5, function='linear')
     
-    # Grid
     res = 45 
     xi = yi = zi = np.linspace(0, 1, res)
     XG, YG, ZG = np.meshgrid(xi, yi, zi, indexing="ij")
+    v_norm = rbf(XG.flatten(), YG.flatten(), ZG.flatten())
     
-    values_norm = rbf(XG.flatten(), YG.flatten(), ZG.flatten())
-    
-    # Grid Koordinatlarını Geri Çevirme
     rx = XG.flatten() * (df["X"].max() - df["X"].min()) + df["X"].min()
     ry = YG.flatten() * (df["Y"].max() - df["Y"].min()) + df["Y"].min()
     rz = ZG.flatten() * (z_top - z_bot) + z_bot
     
-    # --- YENİ BÖLÜM: MESAFE MASKELEME (CLAMPING) ---
-    # Her grid noktasının en yakın gerçek veriye olan uzaklığını bul
-    # KDTree bu işlem için çok hızlıdır.
-    real_points = np.column_stack([df["X"], df["Y"], df["Z"]])
-    grid_points = np.column_stack([rx, ry, rz])
+    # Mesafe Filtreleme
+    tree = cKDTree(np.column_stack([df["X"], df["Y"], df["Z"]]))
+    dist, _ = tree.query(np.column_stack([rx, ry, rz]))
+    v_norm[dist > radius_val] = -999
     
-    tree = cKDTree(real_points)
-    distances, _ = tree.query(grid_points)
+    # Hava Kesimi (Topografya üstü)
+    surf_pts = topo_interp(np.column_stack([rx, ry]))
+    v_norm[rz > surf_pts] = -999
     
-    # Belirlenen yarıçaptan uzaktaki noktaları maskele (-999 yaparak çizimden atıyoruz)
-    values_norm[distances > radius_limit_val] = -999
-    
-    # Topografya kesimi
-    surf_vals = topo_interp(np.column_stack([rx, ry]))
-    
-    return tx, ty, tz, rx, ry, rz, values_norm, df, zmin_plot, zmax_plot, surf_vals
-
-zmin_plot = min(b["z"] for b in boreholes.values()) - 60
-zmax_plot = max(b["z"] for b in boreholes.values()) + 50
-
-# Hesaplamayı çağır (Cache için radius da parametre olarak gidiyor)
-tx, ty, tz, rx, ry, rz, raw_values, df_raw, z_min, z_max, surf_vals = perform_interpolation(radius_limit)
+    return tx, ty, tz, rx, ry, rz, v_norm, df
 
 # -------------------------------------------------
-# 5. GÖRSEL İŞLEME
+# 5. AKIŞ KONTROLÜ VE GÖRSELLEŞTİRME
 # -------------------------------------------------
-plot_values = raw_values.copy()
-mask_air = rz > (surf_vals)
-plot_values[mask_air] = -999
+# Sayfa ilk açıldığında veya butona basıldığında çalışır
+if submitted or 'model_data' not in st.session_state:
+    with st.spinner("Jeolojik model hesaplanıyor..."):
+        # Hesaplama ve Session State'e kaydetme
+        res = perform_interpolation(radius_limit)
+        st.session_state.model_data = res
 
-st.sidebar.markdown("---")
-st.sidebar.info(f"Maksimum Veri Değeri: {df_raw['Val'].max():.2f}")
+# Session state'den verileri geri al
+tx, ty, tz, rx, ry, rz, plot_values, df_raw = st.session_state.model_data
 
-# -------------------------------------------------
-# 6. ÇİZİM
-# -------------------------------------------------
+# Çizim Bölümü
 fig = go.Figure()
 
 # Topografya
-fig.add_trace(go.Surface(
-    x=tx, y=ty, z=tz,
-    opacity=topo_opacity,
-    colorscale=[[0, topo_color], [1, topo_color]],
-    showscale=False,
-    name="Topografya",
-    hoverinfo='none'
-))
+fig.add_trace(go.Surface(x=tx, y=ty, z=tz, opacity=topo_opacity, colorscale=[[0, topo_color], [1, topo_color]], showscale=False, name="Topografya"))
 
-# Sondajlar
+# Sondaj Yolları
 for bh, b in boreholes.items():
-    fig.add_trace(go.Scatter3d(
-        x=[b["x"], b["x"]],
-        y=[b["y"], b["y"]],
-        z=[b["z"], b["z"] - 50],
-        mode="lines",
-        line=dict(color="black", width=5),
-        text=bh,
-        showlegend=False
-    ))
+    fig.add_trace(go.Scatter3d(x=[b["x"], b["x"]], y=[b["y"], b["y"]], z=[b["z"], b["z"] - 50], mode="lines", line=dict(color="black", width=5), name=bh))
 
 # Numuneler
-fig.add_trace(go.Scatter3d(
-    x=df_raw["X"],
-    y=df_raw["Y"],
-    z=df_raw["Z"],
-    mode="markers",
-    marker=dict(
-        size=point_size,
-        color=df_raw["Val"],
-        colorscale="Jet",
-        cmin=0, cmax=df_raw["Val"].max(),
-        line=dict(color="black", width=0.5)
-    ),
-    name="Numuneler",
-    hovertemplate="Değer: %{marker.color:.2f}"
-))
+fig.add_trace(go.Scatter3d(x=df_raw["X"], y=df_raw["Y"], z=df_raw["Z"], mode="markers", 
+                         marker=dict(size=point_size, color=df_raw["Val"], colorscale="Jet", cmin=0, cmax=df_raw["Val"].max(), line=dict(color="black", width=0.5)), 
+                         name="Örnek Noktaları"))
 
 # Risk Hacmi
 if show_volume:
-    fig.add_trace(go.Volume(
-        x=rx, y=ry, z=rz,
-        value=plot_values,
-        isomin=risk_min,
-        isomax=df_raw["Val"].max(),
-        opacity=0.6,
-        surface_count=25,
-        colorscale="Reds",
-        caps=dict(x_show=False, y_show=False, z_show=False),
-        showscale=False,
-        name="Risk Hacmi"
-    ))
-
-# KUZEY OKU (SABİT)
-arrow_x = 630500 
-arrow_y = df_raw["Y"].max() + 200
-arrow_z = 1100
-arrow_len = 250 
-
-fig.add_trace(go.Scatter3d(
-    x=[arrow_x, arrow_x],
-    y=[arrow_y, arrow_y + arrow_len],
-    z=[arrow_z, arrow_z],
-    mode="lines+text",
-    line=dict(color="red", width=15),
-    text=["", "N"],
-    textposition="top center",
-    textfont=dict(size=40, color="black", family="Arial Black"),
-    showlegend=False
-))
-
-fig.add_trace(go.Cone(
-    x=[arrow_x],
-    y=[arrow_y + arrow_len],
-    z=[arrow_z],
-    u=[0], v=[1], w=[0],
-    sizemode="absolute",
-    sizeref=80,
-    anchor="tail",
-    colorscale=[[0, "red"], [1, "red"]],
-    showscale=False,
-    hoverinfo='none'
-))
+    fig.add_trace(go.Volume(x=rx, y=ry, z=rz, value=plot_values, isomin=risk_min, isomax=df_raw["Val"].max(), 
+                          opacity=0.6, surface_count=20, colorscale="Reds", caps=dict(x_show=False, y_show=False, z_show=False), showscale=True))
 
 fig.update_layout(
     scene=dict(
-        xaxis_title="Doğu (X)",
-        yaxis_title="Kuzey (Y)",
-        zaxis_title="Kot (Z)",
-        zaxis=dict(range=[z_min, 1200]),
-        aspectratio=dict(x=1, y=1, z=z_exag * 0.15),
-        camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
+        xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Z (Kot)",
+        aspectratio=dict(x=1, y=1, z=z_exag * 0.15)
     ),
-    margin=dict(r=0, l=0, b=0, t=0),
-    height=800,
-    legend=dict(x=0, y=1)
+    margin=dict(l=0, r=0, b=0, t=0), height=800
 )
 
 st.plotly_chart(fig, use_container_width=True)
+st.success("Model güncellendi. Yeni ayarlar için sol paneli kullanıp 'Modeli Hesapla' butonuna basınız.")
