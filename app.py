@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy.interpolate import Rbf, RegularGridInterpolator
+from scipy.interpolate import Rbf, griddata
 from scipy.spatial import cKDTree
-from PIL import Image
-import os
 
 st.set_page_config(layout="wide", page_title="Jeolojik 3D Mineral Risk Modeli")
 
@@ -63,22 +61,44 @@ with st.sidebar.form("model_ayarlari"):
     
     st.subheader("Görsel Parametreler")
     risk_cutoff = st.slider(f"{target_mineral} Gösterim Eşiği (%)", 0.0, 20.0, 1.0)
-    radius_limit = st.slider("Enterpolasyon Etki Alanı (Metre)", 50, 1000, 300)
-    z_exag = st.slider("Dikey Abartı (Z)", 1, 30, 10)
+    # YENİ: Etki alanı varsayılanı sahayı doldurması için 600m yapıldı
+    radius_limit = st.slider("2D Yatay Etki Alanı (Metre)", 50, 1500, 600, help="Değer büyüdükçe kütleler birbirine daha çok kaynaşır.")
+    z_exag = st.slider("Dikey Abartı (Z)", 1, 30, 8)
     
     st.subheader("Görünüm")
     topo_color = st.color_picker("Topografya Rengi", "#C2B280") 
-    topo_opacity = st.slider("Yüzey Şeffaflığı", 0.0, 1.0, 0.3)
-    point_size = st.slider("Örnek Boyutu", 2, 10, 4)
+    topo_opacity = st.slider("Yüzey Şeffaflığı", 0.0, 1.0, 0.4)
+    point_size = st.slider("Örnek Boyutu", 2, 10, 5)
     
     submitted = st.form_submit_button("🌋 MODELİ OLUŞTUR / GÜNCELLE")
 
 # -------------------------------------------------
-# 3. 3D HESAPLAMA MOTORU
+# 3. YÜZEY (TOPOGRAFYA) OLUŞTURUCU
+# -------------------------------------------------
+def generate_topography(bh_coords, padding=200):
+    """Sondajların tepe kotlarından doğrudan topografya haritası üretir."""
+    collar_x = [c['x'] for c in bh_coords.values()]
+    collar_y = [c['y'] for c in bh_coords.values()]
+    collar_z = [c['z'] for c in bh_coords.values()]
+    
+    tx = np.linspace(min(collar_x) - padding, max(collar_x) + padding, 50)
+    ty = np.linspace(min(collar_y) - padding, max(collar_y) + padding, 50)
+    TX, TY = np.meshgrid(tx, ty)
+    
+    # Kübik interpolasyon ile pürüzsüz yüzey yarat
+    TZ = griddata((collar_x, collar_y), collar_z, (TX, TY), method='cubic')
+    
+    # Kenarlarda kalan (sondaj dışı) boşlukları en yakın veri ile doldur
+    TZ_near = griddata((collar_x, collar_y), collar_z, (TX, TY), method='nearest')
+    TZ[np.isnan(TZ)] = TZ_near[np.isnan(TZ)]
+    
+    return tx, ty, TZ, collar_x, collar_y, collar_z
+
+# -------------------------------------------------
+# 4. HESAPLAMA MOTORU (GEOMETRİ VE HACİM)
 # -------------------------------------------------
 @st.cache_data
 def run_3d_engine(mineral_name, radius_val):
-    # Sondaj koordinatları
     borehole_coords = {
         "1SK": {"x": 631754.22, "y": 4290134.82, "z": 984},
         "2SK": {"x": 630597.83, "y": 4290786.54, "z": 930},
@@ -88,7 +108,7 @@ def run_3d_engine(mineral_name, radius_val):
         "6SK": {"x": 631675.12, "y": 4291824.45, "z": 962},
     }
 
-    # Model için veri noktalarını hazırlama
+    # Gerçek veri noktalarını hazırla
     plot_data = []
     for _, row in df_main.iterrows():
         well = row['Sondaj']
@@ -102,95 +122,97 @@ def run_3d_engine(mineral_name, radius_val):
     
     df_plot = pd.DataFrame(plot_data)
     
-    # RBF İnterpolasyon
-    z_min, z_max = df_plot['z'].min() - 20, df_plot['z'].max() + 10
+    # YENİ EKLENTİ 1: KOORDİNAT NORMALİZASYONU (Sürekli Hacim İçin)
+    # X, Y ve Z eksenleri metrik olarak çok farklı olduğu için [0,1] aralığına sıkıştırıyoruz.
+    x_min, x_max = df_plot['x'].min(), df_plot['x'].max()
+    y_min, y_max = df_plot['y'].min(), df_plot['y'].max()
+    z_min, z_max = df_plot['z'].min() - 15, df_plot['z'].max() + 5
+    
+    xn = (df_plot['x'] - x_min) / (x_max - x_min)
+    yn = (df_plot['y'] - y_min) / (y_max - y_min)
+    zn = (df_plot['z'] - z_min) / (z_max - z_min)
+
+    # İşlem Alanı (Grid)
     res = 40
-    xi = np.linspace(df_plot['x'].min()-200, df_plot['x'].max()+200, res)
-    yi = np.linspace(df_plot['y'].min()-200, df_plot['y'].max()+200, res)
+    margin_xy = 250
+    xi = np.linspace(x_min - margin_xy, x_max + margin_xy, res)
+    yi = np.linspace(y_min - margin_xy, y_max + margin_xy, res)
     zi = np.linspace(z_min, z_max, res)
     XG, YG, ZG = np.meshgrid(xi, yi, zi, indexing='ij')
     
-    # Hesaplama
-    rbf = Rbf(df_plot['x'], df_plot['y'], df_plot['z'], df_plot['val'], function='linear', epsilon=1)
-    vals = rbf(XG.flatten(), YG.flatten(), ZG.flatten())
+    XGn = (XG - x_min) / (x_max - x_min)
+    YGn = (YG - y_min) / (y_max - y_min)
+    ZGn = (ZG - z_min) / (z_max - z_min)
     
-    # Mesafe Maskeleme (Çok uzak noktaları boşalt)
-    tree = cKDTree(np.column_stack([df_plot['x'], df_plot['y'], df_plot['z']]))
-    dist, _ = tree.query(np.column_stack([XG.flatten(), YG.flatten(), ZG.flatten()]))
-    vals[dist > radius_val] = -1
-    
-    return xi, yi, zi, XG, YG, ZG, vals, df_plot, borehole_coords
+    # RBF İnterpolasyon (thin_plate modeli jeolojik kütleler için daha homojendir)
+    rbf = Rbf(xn, yn, zn, df_plot['val'], function='thin_plate')
+    vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
+    vals = np.clip(vals, 0, df_plot['val'].max()) # Negatif hataları sıfırla
 
-# -------------------------------------------------
-# 4. TOPOGRAFYA KONTROLÜ (GÜVENLİK İÇİN)
-# -------------------------------------------------
-def get_topography(df_points):
-    tif_path = "aaa.tif"
-    if os.path.exists(tif_path):
-        img = Image.open(tif_path)
-        topo = np.array(img).astype(float)
-        topo[topo > 3000] = np.nan
-        x0, y0, dx, dy = 628847.89, 4293423.24, 27.73, 27.73
-        tx = x0 + np.arange(topo.shape[1]) * dx
-        ty = y0 - np.arange(topo.shape[0]) * dy
-        tz = topo
-    else:
-        st.sidebar.warning("aaa.tif bulunamadı. Referans düzlem kullanılıyor.")
-        margin = 300
-        tx = np.linspace(df_points['x'].min() - margin, df_points['x'].max() + margin, 50)
-        ty = np.linspace(df_points['y'].min() - margin, df_points['y'].max() + margin, 50)
-        tz = np.full((len(ty), len(tx)), df_points['z'].max() + 30) 
-        
-    return tx, ty, tz
+    # Topografyayı Çek
+    tx, ty, TZ, collar_x, collar_y, collar_z = generate_topography(borehole_coords, padding=margin_xy)
+    
+    # YENİ EKLENTİ 2: TOPOGRAFYA TIRAŞLAMASI
+    # Havada asılı kalan (yüzeyin üzerinde olan) hacimleri traşla
+    TZ_vol = griddata((collar_x, collar_y), collar_z, (XG.flatten(), YG.flatten()), method='nearest')
+    vals[ZG.flatten() > TZ_vol] = -1
+
+    # YENİ EKLENTİ 3: SADECE YATAY (2D) MESAFE MASKESİ
+    # Eskisi gibi 3D mesafe kullanırsak her noktanın etrafında toplar (küreler) oluşur.
+    # 2D mesafe ile maskelemek, jeolojik tabakalar gibi katı bloklar oluşmasını sağlar.
+    tree_2d = cKDTree(np.column_stack([df_plot['x'], df_plot['y']]))
+    dist_2d, _ = tree_2d.query(np.column_stack([XG.flatten(), YG.flatten()]))
+    vals[dist_2d > radius_val] = -1
+    
+    return tx, ty, TZ, XG, YG, ZG, vals, df_plot, borehole_coords
 
 # -------------------------------------------------
 # 5. GÖRSELLEŞTİRME VE ÇİZİM
 # -------------------------------------------------
 if submitted or 'initialized' not in st.session_state:
     st.session_state.initialized = True
-    with st.spinner(f"Modeller hesaplanıyor... Lütfen Bekleyin."):
-        xi, yi, zi, XG, YG, ZG, vals, df_points, bh_coords = run_3d_engine(target_mineral, radius_limit)
-        tx, ty, tz = get_topography(df_points)
+    with st.spinner(f"Kapsamlı Blok Model Oluşturuluyor... Lütfen Bekleyin."):
+        tx, ty, TZ, XG, YG, ZG, vals, df_points, bh_coords = run_3d_engine(target_mineral, radius_limit)
         
         fig = go.Figure()
 
-        # 1. Topografya / Referans Yüzeyi
+        # 1. Topografya (Artık sondajlarla %100 tam oturuyor)
         fig.add_trace(go.Surface(
-            x=tx, y=ty, z=tz, 
+            x=tx, y=ty, z=TZ, 
             opacity=topo_opacity, 
             colorscale=[[0, topo_color], [1, topo_color]],
             showscale=False, 
-            name="Yüzey"
+            name="Yer Yüzeyi"
         ))
 
         # 2. Sondaj Kuyuları
         for name, c in bh_coords.items():
             fig.add_trace(go.Scatter3d(
-                x=[c['x'], c['x']], y=[c['y'], c['y']], z=[c['z'], c['z']-70],
-                mode='lines+text', line=dict(color='black', width=4), 
+                x=[c['x'], c['x']], y=[c['y'], c['y']], z=[c['z'], c['z']-60],
+                mode='lines+text', line=dict(color='black', width=5), 
                 text=["", name], textposition="top center", name=name, showlegend=False
             ))
 
-        # 3. Örnek Noktaları (Sondaj üstündeki gerçek ölçümler)
+        # 3. Örnek Noktaları
         fig.add_trace(go.Scatter3d(
             x=df_points['x'], y=df_points['y'], z=df_points['z'],
             mode='markers',
             marker=dict(size=point_size, color=df_points['val'], colorscale='Viridis', showscale=True, colorbar=dict(title=f"%")),
-            name="Numuneler",
+            name="Sondaj Numuneleri",
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Mineral Hacmi (Volume / Bulut) - İÇİ DOLU VE KATI GÖRÜNÜM İÇİN GÜNCELLENDİ
+        # 4. Katı Mineral Hacmi (Doldurulmuş Blok Model)
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
             isomin=risk_cutoff, isomax=df_points['val'].max(),
-            opacity=0.85,               # Şeffaflık azaltıldı (daha katı görünüm)
-            surface_count=40,           # Katman sayısı artırıldı (daha yoğun dolgu)
+            opacity=0.9,               
+            surface_count=45,           
             colorscale='Reds', 
             showscale=False,
-            caps=dict(x_show=True, y_show=True, z_show=True), # Hacmin uçları kapatıldı
-            name="Yoğunluk Hacmi"
+            caps=dict(x_show=True, y_show=True, z_show=True), 
+            name="Mineral Bloğu"
         ))
 
         fig.update_layout(
