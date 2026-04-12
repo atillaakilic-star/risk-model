@@ -12,7 +12,6 @@ st.set_page_config(layout="wide", page_title="Jeolojik 3D Mineral Risk Modeli")
 # -------------------------------------------------
 # 1. VERİ GİRİŞİ (KOD İÇİNE GÖMÜLÜ - HARDCODED)
 # -------------------------------------------------
-# Tüm CSV okuma sorunlarını çözen, önceden temizlenmiş XRD analiz sonuçları
 raw_mineral_data = [
   {"Sondaj": "1SK", "Derinlik": 0.2, "Kalsit": 31.4, "Dolomit": 0.06, "Aragonit": 6.24, "Kuvars": 8.85, "Kristobalit": 0.37, "Albit": 1.46, "Sanidin": 2.09, "Klinoptilolit": 0.25, "Mordenit": 0.75, "Erionit": 1.25, "Şabazit": 0.08, "Analsim": 0.15, "Hornblend": 0.05, "Aktinolit": 0.04, "Kil Grubu": 1.78, "Volkanik Cam": 45.15},
   {"Sondaj": "1SK", "Derinlik": 14.8, "Kalsit": 11.33, "Dolomit": 0.14, "Aragonit": 15.32, "Kuvars": 13.96, "Kristobalit": 1.22, "Albit": 10.24, "Sanidin": 10.08, "Klinoptilolit": 0.88, "Mordenit": 1.68, "Erionit": 2.85, "Şabazit": 0.25, "Analsim": 0.42, "Hornblend": 0.12, "Aktinolit": 0.13, "Kil Grubu": 2.9, "Volkanik Cam": 28.45},
@@ -68,6 +67,8 @@ with st.sidebar.form("model_ayarlari"):
     z_exag = st.slider("Dikey Abartı (Z)", 1, 30, 10)
     
     st.subheader("Görünüm")
+    # YENİ: Topografya Rengi Seçici Eklendi
+    topo_color = st.color_picker("Topografya Rengi", "#C2B280") 
     topo_opacity = st.slider("Yüzey Şeffaflığı", 0.0, 1.0, 0.3)
     point_size = st.slider("Örnek Boyutu", 2, 10, 4)
     
@@ -102,7 +103,7 @@ def run_3d_engine(mineral_name, radius_val):
     
     df_plot = pd.DataFrame(plot_data)
     
-    # RBF İnterpolasyon (Sadece numunelerin olduğu sınırların içinde)
+    # RBF İnterpolasyon
     z_min, z_max = df_plot['z'].min() - 20, df_plot['z'].max() + 10
     res = 40
     xi = np.linspace(df_plot['x'].min()-200, df_plot['x'].max()+200, res)
@@ -127,7 +128,6 @@ def run_3d_engine(mineral_name, radius_val):
 def get_topography(df_points):
     tif_path = "aaa.tif"
     if os.path.exists(tif_path):
-        # Eğer gerçek harita varsa onu oku
         img = Image.open(tif_path)
         topo = np.array(img).astype(float)
         topo[topo > 3000] = np.nan
@@ -136,12 +136,11 @@ def get_topography(df_points):
         ty = y0 - np.arange(topo.shape[0]) * dy
         tz = topo
     else:
-        # TIF dosyası yoksa kodu çökertmek yerine sondaj z'lerinden düz bir referans yüzeyi oluştur
         st.sidebar.warning("aaa.tif bulunamadı. Referans düzlem kullanılıyor.")
         margin = 300
         tx = np.linspace(df_points['x'].min() - margin, df_points['x'].max() + margin, 50)
         ty = np.linspace(df_points['y'].min() - margin, df_points['y'].max() + margin, 50)
-        tz = np.full((len(ty), len(tx)), df_points['z'].max() + 30) # En yüksek sondajın biraz üstü
+        tz = np.full((len(ty), len(tx)), df_points['z'].max() + 30) 
         
     return tx, ty, tz
 
@@ -157,9 +156,13 @@ if submitted or 'initialized' not in st.session_state:
         fig = go.Figure()
 
         # 1. Topografya / Referans Yüzeyi
+        # YENİ: Renk paleti kullanıcının seçtiği "topo_color" ile değiştirildi.
         fig.add_trace(go.Surface(
             x=tx, y=ty, z=tz, 
-            opacity=topo_opacity, colorscale="Earth", showscale=False, name="Yüzey"
+            opacity=topo_opacity, 
+            colorscale=[[0, topo_color], [1, topo_color]], # Katı renk uygulaması
+            showscale=False, 
+            name="Yüzey"
         ))
 
         # 2. Sondaj Kuyuları
