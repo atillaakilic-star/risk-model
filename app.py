@@ -67,7 +67,6 @@ with st.sidebar.form("model_ayarlari"):
     z_exag = st.slider("Dikey Abartı (Z)", 1, 30, 10)
     
     st.subheader("Görünüm")
-    # YENİ: Topografya Rengi Seçici Eklendi
     topo_color = st.color_picker("Topografya Rengi", "#C2B280") 
     topo_opacity = st.slider("Yüzey Şeffaflığı", 0.0, 1.0, 0.3)
     point_size = st.slider("Örnek Boyutu", 2, 10, 4)
@@ -156,11 +155,10 @@ if submitted or 'initialized' not in st.session_state:
         fig = go.Figure()
 
         # 1. Topografya / Referans Yüzeyi
-        # YENİ: Renk paleti kullanıcının seçtiği "topo_color" ile değiştirildi.
         fig.add_trace(go.Surface(
             x=tx, y=ty, z=tz, 
             opacity=topo_opacity, 
-            colorscale=[[0, topo_color], [1, topo_color]], # Katı renk uygulaması
+            colorscale=[[0, topo_color], [1, topo_color]],
             showscale=False, 
             name="Yüzey"
         ))
@@ -182,14 +180,16 @@ if submitted or 'initialized' not in st.session_state:
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Mineral Hacmi (Volume / Bulut)
+        # 4. Mineral Hacmi (Volume / Bulut) - İÇİ DOLU VE KATI GÖRÜNÜM İÇİN GÜNCELLENDİ
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
             isomin=risk_cutoff, isomax=df_points['val'].max(),
-            opacity=0.45, surface_count=15,
-            colorscale='Reds', showscale=False,
-            caps=dict(x_show=False, y_show=False, z_show=False),
+            opacity=0.85,               # Şeffaflık azaltıldı (daha katı görünüm)
+            surface_count=40,           # Katman sayısı artırıldı (daha yoğun dolgu)
+            colorscale='Reds', 
+            showscale=False,
+            caps=dict(x_show=True, y_show=True, z_show=True), # Hacmin uçları kapatıldı
             name="Yoğunluk Hacmi"
         ))
 
