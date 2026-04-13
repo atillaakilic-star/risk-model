@@ -199,36 +199,37 @@ if submitted or 'initialized' not in st.session_state:
                 text=["", name], textposition="top center", name=name, showlegend=False
             ))
 
-        # 3. Örnek Noktaları
+        # 3. Örnek Noktaları (YENİ: Renk Cetveli tamamen gizlendi)
         fig.add_trace(go.Scatter3d(
             x=df_points['x'], y=df_points['y'], z=df_points['z'],
             mode='markers',
             marker=dict(
                 size=point_size, color=df_points['val'], colorscale='Viridis', 
-                showscale=True, colorbar=dict(title="Numune %", x=1.0)
+                showscale=False # KALDIRILDI
             ),
             name="Sondaj Numuneleri",
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Katı Mineral Hacmi
+        # 4. Katı Mineral Hacmi (YENİ: Sadece bu renk barı kaldı ve boyu 1/3 yapıldı)
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
             isomin=risk_cutoff, isomax=df_points['val'].max(),
             opacity=0.9, surface_count=45, colorscale='Reds', 
-            showscale=True, colorbar=dict(title="Blok Model %", x=1.12),
+            showscale=True, 
+            colorbar=dict(title="Mineral (%)", x=1.02, len=0.33, thickness=20), # BOYUT %33'E İNDİRİLDİ
             caps=dict(x_show=True, y_show=True, z_show=True), 
             name="Mineral Bloğu"
         ))
 
         # =======================================================
-        # 5. KUZEY OKU (GÜNCELLENDİ: SABİT KONUM, METİN VE BÜYÜTÜLDÜ)
+        # 5. KUZEY OKU (SABİT KONUM, METİN VE BÜYÜTÜLDÜ)
         # =======================================================
         arrow_x = 630500
         arrow_y = 4293000
         arrow_z = 1070
-        arrow_len = 250 # Oku ve çizgiyi oldukça büyüttük
+        arrow_len = 250 
 
         # Sadece N yazan kalın ve uzun referans çizgisi
         fig.add_trace(go.Scatter3d(
