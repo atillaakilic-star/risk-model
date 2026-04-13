@@ -199,7 +199,7 @@ if submitted or 'initialized' not in st.session_state:
                 text=["", name], textposition="top center", name=name, showlegend=False
             ))
 
-        # 3. Örnek Noktaları (YENİ: Renk Cetveli Ekranın Sağına (x=1.0) Kondu)
+        # 3. Örnek Noktaları
         fig.add_trace(go.Scatter3d(
             x=df_points['x'], y=df_points['y'], z=df_points['z'],
             mode='markers',
@@ -211,7 +211,7 @@ if submitted or 'initialized' not in st.session_state:
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Katı Mineral Hacmi (YENİ: Renk Cetveli Açıldı ve Ekranın En Sağına (x=1.12) Kondu)
+        # 4. Katı Mineral Hacmi
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
@@ -223,26 +223,27 @@ if submitted or 'initialized' not in st.session_state:
         ))
 
         # =======================================================
-        # 5. YENİ EKLENTİ: KUZEY OKU VE FİZİKSEL ÖLÇEK (SCALE BAR)
+        # 5. KUZEY OKU (GÜNCELLENDİ: SABİT KONUM, METİN VE BÜYÜTÜLDÜ)
         # =======================================================
-        arrow_x = df_points['x'].min() - 150
-        arrow_y = df_points['y'].min()
-        arrow_z = df_points['z'].max() + 50
+        arrow_x = 630500
+        arrow_y = 4293000
+        arrow_z = 1070
+        arrow_len = 250 # Oku ve çizgiyi oldukça büyüttük
 
-        # 100 metrelik referans çizgisi
+        # Sadece N yazan kalın ve uzun referans çizgisi
         fig.add_trace(go.Scatter3d(
-            x=[arrow_x, arrow_x], y=[arrow_y, arrow_y + 100], z=[arrow_z, arrow_z],
-            mode='lines+text', line=dict(color='red', width=10),
-            text=["", "N (Kuzey) - 100m"], textposition="top right",
-            textfont=dict(color='red', size=14, family='Arial Black'),
-            showlegend=False, name="Mesafe Ölçeği", hoverinfo='none'
+            x=[arrow_x, arrow_x], y=[arrow_y, arrow_y + arrow_len], z=[arrow_z, arrow_z],
+            mode='lines+text', line=dict(color='red', width=15),
+            text=["", "N"], textposition="top center",
+            textfont=dict(color='red', size=35, family='Arial Black'),
+            showlegend=False, name="Kuzey Oku", hoverinfo='none'
         ))
         
-        # Okun Ucu (Kuzeyi gösteren koni)
+        # Okun Ucu (Kuzeyi gösteren dev koni)
         fig.add_trace(go.Cone(
-            x=[arrow_x], y=[arrow_y + 100], z=[arrow_z],
-            u=[0], v=[25], w=[0], # Y eksenine (Kuzeye) bakıyor
-            sizemode="absolute", sizeref=40, anchor="tail",
+            x=[arrow_x], y=[arrow_y + arrow_len], z=[arrow_z],
+            u=[0], v=[1], w=[0], 
+            sizemode="absolute", sizeref=80, anchor="tail",
             colorscale=[[0, 'red'], [1, 'red']], showscale=False, hoverinfo='none'
         ))
 
