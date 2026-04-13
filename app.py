@@ -147,7 +147,7 @@ def run_3d_engine(mineral_name, radius_val):
     YGn = (YG - y_min) / (y_max - y_min)
     ZGn = (ZG - z_min) / (z_max - z_min)
     
-    # 3. RBF: YENİ (LINEAR) - Matematiksel sıçramaları (overshoot) engeller
+    # 3. RBF (Linear Model)
     rbf = Rbf(xn, yn, zn, df_plot['val'], function='linear', epsilon=2.0)
     vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
     vals = np.clip(vals, 0, df_plot['val'].max())
@@ -188,18 +188,22 @@ if submitted or 'initialized' not in st.session_state:
             showscale=False, name="Gerçek DEM Topografyası"
         ))
 
-        # 2. Sondaj Kuyuları
+        # 2. Sondaj Kuyuları ve Siyah Belirgin İsimleri
         for name, c in bh_coords.items():
             well_min_z = df_points[df_points['well'] == name]['z'].min()
             if pd.isna(well_min_z): well_min_z = c['z'] - 50 
             
+            # YENİ: İsimler (text) kuyunun tepesine (c['z']) yerleştirildi. Font siyah ve kalın (bold) yapıldı.
             fig.add_trace(go.Scatter3d(
                 x=[c['x'], c['x']], y=[c['y'], c['y']], z=[c['z'], well_min_z],
-                mode='lines+text', line=dict(color='black', width=5), 
-                text=["", name], textposition="top center", name=name, showlegend=False
+                mode='lines+text', line=dict(color='black', width=6), 
+                text=[f"<b>{name}</b>", ""],  # İsim sadece üst koordinatta çıkacak
+                textposition="top center", 
+                textfont=dict(color='black', size=16, family="Arial Black"), # Siyah ve kalın font
+                name=name, showlegend=False
             ))
 
-        # 3. Örnek Noktaları (Renk barı kapatıldı)
+        # 3. Örnek Noktaları
         fig.add_trace(go.Scatter3d(
             x=df_points['x'], y=df_points['y'], z=df_points['z'],
             mode='markers',
@@ -211,7 +215,7 @@ if submitted or 'initialized' not in st.session_state:
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Katı Mineral Hacmi (Dinamik cmin/cmax ile renk cetveli eşiğe bağlandı)
+        # 4. Katı Mineral Hacmi (Dinamik cmin/cmax ile)
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
