@@ -74,7 +74,7 @@ with st.sidebar.form("model_ayarlari"):
     submitted = st.form_submit_button("🌋 MODELİ OLUŞTUR / GÜNCELLE")
 
 # -------------------------------------------------
-# 3. HESAPLAMA MOTORU (GEOMETRİ VE HACİM)
+# 3. HESAPLAMA MOTORU
 # -------------------------------------------------
 @st.cache_data
 def run_3d_engine(mineral_name, radius_val):
@@ -113,13 +113,13 @@ def run_3d_engine(mineral_name, radius_val):
     
     topo_interp = RegularGridInterpolator((tx, ty[::-1]), np.flipud(tz).T, bounds_error=False, fill_value=None)
 
-    # 2. NUMUNE VERİLERİNİ HAZIRLA
+    # 2. NUMUNE VERİLERİ
     plot_data = []
     for _, row in df_main.iterrows():
         well = row['Sondaj']
         if well in borehole_coords:
             plot_data.append({
-                'well': well, # Tıraşlama algoritması için eklendi
+                'well': well,
                 'x': borehole_coords[well]['x'],
                 'y': borehole_coords[well]['y'],
                 'z': borehole_coords[well]['z'] - row['Derinlik'],
@@ -136,7 +136,7 @@ def run_3d_engine(mineral_name, radius_val):
     yn = (df_plot['y'] - y_min) / (y_max - y_min)
     zn = (df_plot['z'] - z_min) / (z_max - z_min)
 
-    # İşlem Alanı (Grid)
+    # Grid
     res = 40
     xi = np.linspace(x_min - margin_xy, x_max + margin_xy, res)
     yi = np.linspace(y_min - margin_xy, y_max + margin_xy, res)
@@ -147,33 +147,26 @@ def run_3d_engine(mineral_name, radius_val):
     YGn = (YG - y_min) / (y_max - y_min)
     ZGn = (ZG - z_min) / (z_max - z_min)
     
-    # 3. RBF (HACİM HESAPLAMA)
+    # RBF
     rbf = Rbf(xn, yn, zn, df_plot['val'], function='thin_plate')
     vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
     vals = np.clip(vals, 0, df_plot['val'].max())
 
-    # 4. ÜST SINIR: GERÇEK DEM TOPOGRAFYASI İLE TIRAŞLAMA
+    # ÜST TIRAŞLAMA (DEM)
     surf_pts = topo_interp(np.column_stack([XG.flatten(), YG.flatten()]))
     vals[ZG.flatten() > surf_pts] = -1
 
-    # YATAY (2D) MESAFE MASKESİ
+    # YATAY (2D) TIRAŞLAMA
     tree_2d = cKDTree(np.column_stack([df_plot['x'], df_plot['y']]))
     dist_2d, _ = tree_2d.query(np.column_stack([XG.flatten(), YG.flatten()]))
     vals[dist_2d > radius_val] = -1
     
-    # =========================================================
-    # YENİ EKLENTİ: ALT SINIR (BASEMENT) TIRAŞLAMASI
-    # Her sondajın en alt numunesini (minimum Z değeri) bulur
-    # =========================================================
+    # ALT TIRAŞLAMA (Sondaj Dibi)
     idx_min_z = df_plot.groupby('well')['z'].idxmin()
     bottom_pts = df_plot.loc[idx_min_z]
-
-    # Modeldeki her nokta için en yakın sondajın alt sınır kotunu bul
     tree_bottom = cKDTree(np.column_stack([bottom_pts['x'], bottom_pts['y']]))
     _, idx_nearest = tree_bottom.query(np.column_stack([XG.flatten(), YG.flatten()]))
     nearest_bottom_z = bottom_pts.iloc[idx_nearest]['z'].values
-
-    # Hacmi, o bölgeye en yakın olan sondajın bittiği derinlikten itibaren kes (-2 metre tolerans)
     vals[ZG.flatten() < (nearest_bottom_z - 2)] = -1
     
     return tx, ty, tz, XG, YG, ZG, vals, df_plot, borehole_coords
@@ -183,25 +176,22 @@ def run_3d_engine(mineral_name, radius_val):
 # -------------------------------------------------
 if submitted or 'initialized' not in st.session_state:
     st.session_state.initialized = True
-    with st.spinner(f"Topografya ve Blok Model Oluşturuluyor... Lütfen Bekleyin."):
+    with st.spinner(f"Topografya, Ölçekler ve Model Yükleniyor..."):
         tx, ty, tz, XG, YG, ZG, vals, df_points, bh_coords = run_3d_engine(target_mineral, radius_limit)
         
         fig = go.Figure()
 
-        # 1. DEM Dosyasından Gelen Gerçek Topografya
+        # 1. Topografya
         fig.add_trace(go.Surface(
             x=tx, y=ty, z=tz, 
-            opacity=topo_opacity, 
-            colorscale=[[0, topo_color], [1, topo_color]],
-            showscale=False, 
-            name="Gerçek DEM Topografyası"
+            opacity=topo_opacity, colorscale=[[0, topo_color], [1, topo_color]],
+            showscale=False, name="Gerçek DEM Topografyası"
         ))
 
-        # 2. Sondaj Kuyuları (Derinlikleri otomatik olarak gerçek numune diplerine kadar çizer)
+        # 2. Sondaj Kuyuları
         for name, c in bh_coords.items():
-            # YENİ: Kuyunun siyah çizgisini tam olarak o kuyuya ait en derin veride bitir.
             well_min_z = df_points[df_points['well'] == name]['z'].min()
-            if pd.isna(well_min_z): well_min_z = c['z'] - 50 # Herhangi bir hataya karşı yedek
+            if pd.isna(well_min_z): well_min_z = c['z'] - 50 
             
             fig.add_trace(go.Scatter3d(
                 x=[c['x'], c['x']], y=[c['y'], c['y']], z=[c['z'], well_min_z],
@@ -209,26 +199,51 @@ if submitted or 'initialized' not in st.session_state:
                 text=["", name], textposition="top center", name=name, showlegend=False
             ))
 
-        # 3. Örnek Noktaları
+        # 3. Örnek Noktaları (YENİ: Renk Cetveli Ekranın Sağına (x=1.0) Kondu)
         fig.add_trace(go.Scatter3d(
             x=df_points['x'], y=df_points['y'], z=df_points['z'],
             mode='markers',
-            marker=dict(size=point_size, color=df_points['val'], colorscale='Viridis', showscale=True, colorbar=dict(title=f"%")),
+            marker=dict(
+                size=point_size, color=df_points['val'], colorscale='Viridis', 
+                showscale=True, colorbar=dict(title="Numune %", x=1.0)
+            ),
             name="Sondaj Numuneleri",
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Katı Mineral Hacmi (Doldurulmuş Blok Model)
+        # 4. Katı Mineral Hacmi (YENİ: Renk Cetveli Açıldı ve Ekranın En Sağına (x=1.12) Kondu)
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
             isomin=risk_cutoff, isomax=df_points['val'].max(),
-            opacity=0.9,               
-            surface_count=45,           
-            colorscale='Reds', 
-            showscale=False,
+            opacity=0.9, surface_count=45, colorscale='Reds', 
+            showscale=True, colorbar=dict(title="Blok Model %", x=1.12),
             caps=dict(x_show=True, y_show=True, z_show=True), 
             name="Mineral Bloğu"
+        ))
+
+        # =======================================================
+        # 5. YENİ EKLENTİ: KUZEY OKU VE FİZİKSEL ÖLÇEK (SCALE BAR)
+        # =======================================================
+        arrow_x = df_points['x'].min() - 150
+        arrow_y = df_points['y'].min()
+        arrow_z = df_points['z'].max() + 50
+
+        # 100 metrelik referans çizgisi
+        fig.add_trace(go.Scatter3d(
+            x=[arrow_x, arrow_x], y=[arrow_y, arrow_y + 100], z=[arrow_z, arrow_z],
+            mode='lines+text', line=dict(color='red', width=10),
+            text=["", "N (Kuzey) - 100m"], textposition="top right",
+            textfont=dict(color='red', size=14, family='Arial Black'),
+            showlegend=False, name="Mesafe Ölçeği", hoverinfo='none'
+        ))
+        
+        # Okun Ucu (Kuzeyi gösteren koni)
+        fig.add_trace(go.Cone(
+            x=[arrow_x], y=[arrow_y + 100], z=[arrow_z],
+            u=[0], v=[25], w=[0], # Y eksenine (Kuzeye) bakıyor
+            sizemode="absolute", sizeref=40, anchor="tail",
+            colorscale=[[0, 'red'], [1, 'red']], showscale=False, hoverinfo='none'
         ))
 
         fig.update_layout(
