@@ -147,8 +147,8 @@ def run_3d_engine(mineral_name, radius_val):
     YGn = (YG - y_min) / (y_max - y_min)
     ZGn = (ZG - z_min) / (z_max - z_min)
     
-    # RBF
-    rbf = Rbf(xn, yn, zn, df_plot['val'], function='thin_plate')
+    # 3. RBF: YENİ (LINEAR) - Matematiksel sıçramaları (overshoot) engeller
+    rbf = Rbf(xn, yn, zn, df_plot['val'], function='linear', epsilon=2.0)
     vals = rbf(XGn.flatten(), YGn.flatten(), ZGn.flatten())
     vals = np.clip(vals, 0, df_plot['val'].max())
 
@@ -199,7 +199,7 @@ if submitted or 'initialized' not in st.session_state:
                 text=["", name], textposition="top center", name=name, showlegend=False
             ))
 
-        # 3. Örnek Noktaları
+        # 3. Örnek Noktaları (Renk barı kapatıldı)
         fig.add_trace(go.Scatter3d(
             x=df_points['x'], y=df_points['y'], z=df_points['z'],
             mode='markers',
@@ -211,12 +211,12 @@ if submitted or 'initialized' not in st.session_state:
             hovertemplate="Değer: %{marker.color:.2f}%<extra></extra>"
         ))
 
-        # 4. Katı Mineral Hacmi (YENİ: Renk cetveli eşiğe bağlandı (cmin, cmax))
+        # 4. Katı Mineral Hacmi (Dinamik cmin/cmax ile renk cetveli eşiğe bağlandı)
         fig.add_trace(go.Volume(
             x=XG.flatten(), y=YG.flatten(), z=ZG.flatten(),
             value=vals,
             isomin=risk_cutoff, isomax=df_points['val'].max(),
-            cmin=risk_cutoff, cmax=df_points['val'].max(), # RENKLER BURADAN DİNAMİK GÜNCELLENİR
+            cmin=risk_cutoff, cmax=df_points['val'].max(), 
             opacity=0.9, surface_count=45, colorscale='Reds', 
             showscale=True, 
             colorbar=dict(title="Mineral (%)", x=1.02, len=0.33, thickness=20),
